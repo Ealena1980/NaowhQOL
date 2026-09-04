@@ -578,49 +578,97 @@ local function OnBuffActiveSpellCast(castSpellId)
     end
 end
 
+-- Secret aura fields cannot be iterated, indexed, compared or boolean-tested,
+-- so every value read out of updateInfo is unwrapped through these first.
+local function GetAuraSpellId(aura)
+    if IsSecret(aura) then return nil end
+    local spellId = aura.spellId
+    if IsSecret(spellId) then return nil end
+    return spellId
+end
+
+local function GetAuraInstanceID(aura)
+    if IsSecret(aura) then return nil end
+    local instanceID = aura.auraInstanceID
+    if IsSecret(instanceID) then return nil end
+    return instanceID
+end
+
+-- Re-reads one tracked buff from live aura data, for when updateInfo is unreadable.
+local function ResyncBuffActiveKey(key)
+    local aura = C_UnitAuras.GetPlayerAuraBySpellID(key)
+    if IsSecret(aura) then
+        -- Cannot inspect it; keep the current state rather than flicker the display.
+        expectingBuffAura[key] = nil
+        return
+    end
+    if aura then
+        SetBuffActiveState(key, true, GetAuraInstanceID(aura))
+    else
+        SetBuffActiveState(key, false, nil)
+    end
+    expectingBuffAura[key] = nil
+end
+
+local function ResyncBuffActiveFromLiveAuras()
+    for _, entry in ipairs(cachedMovementSpells) do
+        if entry.checkType == "buffActive" then
+            ResyncBuffActiveKey(BuffActiveKey(entry))
+        end
+    end
+end
+
 local function OnPlayerBuffActiveAuraUpdate(updateInfo)
     if not updateInfo then return end
 
-    if updateInfo.removedAuraInstanceIDs then
+    local isFullUpdate = updateInfo.isFullUpdate
+    local removed = updateInfo.removedAuraInstanceIDs
+    local added = updateInfo.addedAuras
+
+    if IsSecret(isFullUpdate) or isFullUpdate or IsSecret(removed) or IsSecret(added) then
+        ResyncBuffActiveFromLiveAuras()
+        return
+    end
+
+    if type(removed) == "table" then
         for _, entry in ipairs(cachedMovementSpells) do
             if entry.checkType == "buffActive" then
                 local key = BuffActiveKey(entry)
                 local state = buffActiveState[key]
                 if state and state.instanceID then
-                    for _, instanceID in ipairs(updateInfo.removedAuraInstanceIDs) do
-                        if instanceID == state.instanceID then
+                    for _, instanceID in ipairs(removed) do
+                        if not IsSecret(instanceID) and instanceID == state.instanceID then
                             SetBuffActiveState(key, false, nil)
                             expectingBuffAura[key] = nil
                             break
                         end
                     end
+                elseif state and state.active then
+                    -- Instance ID was secret when cached, so it cannot be matched
+                    -- against the removal list; ask the game directly instead.
+                    ResyncBuffActiveKey(key)
                 end
             end
         end
     end
 
-    if updateInfo.addedAuras then
+    if type(added) == "table" then
         for _, entry in ipairs(cachedMovementSpells) do
             if entry.checkType == "buffActive" then
                 local key = BuffActiveKey(entry)
                 if expectingBuffAura[key] then
-                    for _, aura in ipairs(updateInfo.addedAuras) do
-                        local matches = false
-                        if aura.spellId and not IsSecret(aura.spellId) then
-                            matches = (aura.spellId == key)
-                        else
-                            matches = true
-                        end
-                        if matches and aura.auraInstanceID then
-                            SetBuffActiveState(key, true, aura.auraInstanceID)
+                    for _, aura in ipairs(added) do
+                        local spellId = GetAuraSpellId(aura)
+                        if spellId == nil or spellId == key then
+                            SetBuffActiveState(key, true, GetAuraInstanceID(aura))
                             expectingBuffAura[key] = nil
                             break
                         end
                     end
                 end
-                for _, aura in ipairs(updateInfo.addedAuras) do
-                    if aura.spellId and not IsSecret(aura.spellId) and aura.spellId == key and aura.auraInstanceID then
-                        SetBuffActiveState(key, true, aura.auraInstanceID)
+                for _, aura in ipairs(added) do
+                    if GetAuraSpellId(aura) == key then
+                        SetBuffActiveState(key, true, GetAuraInstanceID(aura))
                     end
                 end
             end

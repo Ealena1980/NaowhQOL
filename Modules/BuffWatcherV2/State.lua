@@ -717,17 +717,46 @@ function BWV2:SetDeadState(dead)
     end
 end
 
+-- Re-checks the aura instances we cached against live data. Used when UNIT_AURA
+-- hands us secret values, which cannot be iterated, indexed or compared.
+function BWV2:ResyncClassBuffInstances()
+    if not C_UnitAuras.GetAuraDataByAuraInstanceID then return end
+    for instanceID, groupKey in pairs(self.classBuffInstanceIDs) do
+        local auraData = C_UnitAuras.GetAuraDataByAuraInstanceID("player", instanceID)
+        if not IsSecret(auraData) and auraData == nil then
+            self.classBuffSelfCache[groupKey] = nil
+            self.classBuffInstanceIDs[instanceID] = nil
+            self:SetDirty()
+        end
+    end
+end
+
 function BWV2:OnClassBuffAuraEvent(updateInfo)
     if not InCombatLockdown() or not updateInfo then return end
 
-    if updateInfo.removedAuraInstanceIDs then
-        for _, instanceID in ipairs(updateInfo.removedAuraInstanceIDs) do
-            local ok, groupKey = pcall(function() return self.classBuffInstanceIDs[instanceID] end)
-            if ok and groupKey then
-                self.classBuffSelfCache[groupKey] = nil
-                self.classBuffInstanceIDs[instanceID] = nil
-                self:SetDirty()
-            end
+    local isFullUpdate = updateInfo.isFullUpdate
+    if IsSecret(isFullUpdate) or isFullUpdate then
+        self:ResyncClassBuffInstances()
+        return
+    end
+
+    local removed = updateInfo.removedAuraInstanceIDs
+    if IsSecret(removed) then
+        self:ResyncClassBuffInstances()
+        return
+    end
+    if type(removed) ~= "table" then return end
+
+    for _, instanceID in ipairs(removed) do
+        if IsSecret(instanceID) then
+            self:ResyncClassBuffInstances()
+            return
+        end
+        local groupKey = self.classBuffInstanceIDs[instanceID]
+        if groupKey then
+            self.classBuffSelfCache[groupKey] = nil
+            self.classBuffInstanceIDs[instanceID] = nil
+            self:SetDirty()
         end
     end
 end
@@ -738,8 +767,12 @@ function BWV2:CacheClassBuffState(groupKey, hasBuff, spellIDs)
     if hasBuff and spellIDs then
         for _, spellID in ipairs(spellIDs) do
             local auraData = C_UnitAuras.GetPlayerAuraBySpellID(spellID)
-            if auraData and auraData.auraInstanceID then
-                self.classBuffInstanceIDs[auraData.auraInstanceID] = groupKey
+            if auraData then
+                -- A secret instance ID cannot be used as a table key or compared later.
+                local instanceID = auraData.auraInstanceID
+                if not IsSecret(instanceID) and instanceID ~= nil then
+                    self.classBuffInstanceIDs[instanceID] = groupKey
+                end
             end
         end
     end
